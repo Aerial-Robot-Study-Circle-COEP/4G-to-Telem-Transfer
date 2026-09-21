@@ -136,21 +136,48 @@ winget install usbipd
    ```
    usbipd list
    ```
-2. Create a file called `attach-telem.bat` with:
+2. Create the startup script — use whichever of these matches where
+   `usbipd` works for you (cmd or PowerShell); either works the same way.
+
+   **Option A — cmd (`.bat` file):**
    ```bat
    @echo off
    usbipd attach --wsl --busid <BUSID> --auto-attach
    ```
-   (replace `<BUSID>` with the value from step 1)
-3. Copy this `.bat` file directly into your Windows Startup folder — open
-   it via `Win + R` → type `shell:startup` → Enter — and paste the file
-   in there.
-4. Right-click the file → Properties → Shortcut tab → Advanced → check
-   **"Run as administrator"** → OK → OK.
+   Save as `attach-telem.bat` (replace `<BUSID>` with the value from
+   step 1).
 
-   > If Properties doesn't show a Shortcut tab (because it's the `.bat`
-   > file itself, not a shortcut to it), that's fine — Windows still
-   > elevates it via the UAC prompt below.
+   **Option B — PowerShell (`.ps1` file):**
+   ```powershell
+   usbipd attach --wsl --busid <BUSID> --auto-attach
+   ```
+   Save as `attach-telem.ps1` (replace `<BUSID>` with the value from
+   step 1).
+
+   > Not sure which one has `usbipd` on its PATH? Run `where.exe usbipd`
+   > in each — whichever returns a path is the one to use. If cmd works
+   > and PowerShell doesn't (or vice versa), just go with the one that
+   > works; no need to chase down the PATH issue.
+
+3. Place the script in your Windows Startup folder:
+   - Open it via `Win + R` → type `shell:startup` → Enter.
+   - **`.bat` file:** copy the file itself directly into this folder.
+   - **`.ps1` file:** PowerShell scripts don't run on double-click by
+     default, so instead create a **shortcut** here pointing at:
+     ```
+     powershell.exe -ExecutionPolicy Bypass -File "C:\path\to\attach-telem.ps1"
+     ```
+     (Right-click inside the Startup folder → New → Shortcut → paste the
+     line above as the location, using the actual path where you saved
+     the `.ps1` file.)
+4. Mark it to run as administrator (`usbipd attach` requires elevation):
+   - **`.bat` file:** right-click it → Properties → if a Shortcut tab is
+     present, go to Advanced → check **"Run as administrator"** → OK →
+     OK. If there's no Shortcut tab, Windows will still prompt via UAC
+     when it runs — that's fine.
+   - **`.ps1` shortcut:** right-click the shortcut → Properties →
+     Shortcut tab → Advanced → check **"Run as administrator"** → OK →
+     OK.
 
 From now on, this runs automatically on every login (you'll get one UAC
 prompt to click "Yes" on each time) and the radio will already be
