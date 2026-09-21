@@ -117,27 +117,55 @@ No setup needed beyond this each session — just these steps:
 **Windows (via WSL):**
 
 The radio needs to be attached to WSL first, since WSL doesn't see USB
-devices by default.
+devices by default. `usbipd attach` doesn't persist across PC restarts on
+its own, so set up the startup script below once — after that, this step
+is automatic on every login and you can skip straight to "Start the PPP
+client."
 
-In **PowerShell as Administrator** (one-time install, if not already done):
+**One-time setup, install usbipd (if not already done):**
+
+In cmd or PowerShell as Administrator:
 
 ```powershell
 winget install usbipd
 ```
 
-Each time you plug in the radio:
+**One-time setup, auto-attach on every login:**
 
-```powershell
-usbipd list
-usbipd bind --busid <BUSID>      # only needed once ever, per device
-usbipd attach --wsl --busid <BUSID>
-```
+1. Find your radio's busid:
+   ```
+   usbipd list
+   ```
+2. Create a file called `attach-telem.bat` with:
+   ```bat
+   @echo off
+   usbipd attach --wsl --busid <BUSID> --auto-attach
+   ```
+   (replace `<BUSID>` with the value from step 1)
+3. Copy this `.bat` file directly into your Windows Startup folder — open
+   it via `Win + R` → type `shell:startup` → Enter — and paste the file
+   in there.
+4. Right-click the file → Properties → Shortcut tab → Advanced → check
+   **"Run as administrator"** → OK → OK.
 
-Then inside WSL:
+   > If Properties doesn't show a Shortcut tab (because it's the `.bat`
+   > file itself, not a shortcut to it), that's fine — Windows still
+   > elevates it via the UAC prompt below.
+
+From now on, this runs automatically on every login (you'll get one UAC
+prompt to click "Yes" on each time) and the radio will already be
+attached to WSL by the time you open a terminal — no manual `usbipd`
+commands needed per session.
+
+**Verify it worked**, any time:
 
 ```bash
 ls /dev/ttyUSB*
 ```
+
+If this comes up empty despite the startup script, check `usbipd list`
+in Windows — the busid may have changed (e.g. radio plugged into a
+different USB port), in which case update it in `attach-telem.bat`.
 
 **Mac/Linux:**
 
@@ -200,7 +228,7 @@ When you're done:
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `ls /dev/ttyUSB*` shows nothing (WSL) | Radio not attached to WSL | Re-run `usbipd attach --wsl --busid <BUSID>` |
+| `ls /dev/ttyUSB*` shows nothing (WSL) | Radio not attached to WSL, or startup script didn't run/busid changed | Check `usbipd list` in Windows; re-run the `.bat` manually or fix the busid in it |
 | `pppd: unrecognized option '/dev/ttyUSB0'` | Device doesn't exist yet | Fix the above first, then retry `pppd` |
 | `LCP: timeout sending Config-Requests` then terminates | Other side's `pppd` isn't running yet | Make sure the Pi's service is active (`systemctl status telem-ppp`) and start the laptop side after |
 | `ping` works but `ssh` hangs indefinitely | MTU too high, large packets dropped | Run `sudo ip link set ppp0 mtu 296` on **both** ends, in a separate terminal from the one running `pppd` |
