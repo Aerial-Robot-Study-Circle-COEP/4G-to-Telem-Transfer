@@ -1,133 +1,284 @@
-# NEMA 17 — 60° Stepper Indexing with Raspberry Pi 4B + A4988
+# SSH to the Companion Pi over the Telemetry Radio
 
-Drive a NEMA 17 stepper motor in precise 60° increments using a Raspberry Pi 4B and an A4988 driver breakout board (the "STEPPER USE 9V/1A POWER" style module with E/D/S signal pins).
+This guide covers switching from normal Wi-Fi SSH to SSH over the telemetry
+radio link (SiK-style radio pair), for use in the field where Wi-Fi/4G isn't
+available.
 
-## Purpose
+It works by running **PPP (Point-to-Point Protocol)** over the raw serial
+link the telemetry radios provide, which turns the radio connection into a
+regular IP link — so normal `ssh` works over it once it's up.
 
-This mechanism is used as a **payload release actuator on a delivery drone**, indexing a six-position payload carousel/drum in 60° steps to sequentially drop up to **five 200 g parcels**, one per index. Each command (`stepper60.py N`) advances the mechanism by `N` positions over telemetry from the companion computer, releasing one parcel bay at a time. Because releases are discrete positions rather than continuous motion, open-loop stepping is sufficient, and the absolute-step-tracking in the control code ensures the mechanism returns to exact zero after a full 360° cycle, so alignment doesn't drift across repeated delivery runs.
+---
 
-## Purpose: Drone Payload-Drop Actuator
+## How it works (read this once)
 
-This mechanism is designed as the release actuator for a multi-payload delivery drone. A single NEMA 17, geared to a carousel/hub holding **5 parcels of 200 g each (1 kg total payload)**, indexes 60° per release command — one full 360° rotation cycles through all 5 drop positions plus a return-to-home/locked position, releasing exactly one parcel per index.
+- Two telemetry radios: one plugged into the **Pi** (USB), one plugged into
+  your **laptop** (USB).
+- The Pi runs a `pppd` service that starts automatically on boot — **no
+  Wi-Fi or prior SSH access is needed** for this to come up.
+- On your laptop, you manually start a matching `pppd` client whenever you
+  want to connect.
+- Once both sides are up, the Pi is reachable at a fixed IP
+  (`10.0.0.1`) over the radio link, and you `ssh` to it like normal.
 
-Key implications for this use case:
+| Device | Role     | IP address |
+|--------|----------|------------|
+| Pi     | server   | `10.0.0.1` |
+| Laptop | client   | `10.0.0.2` |
 
-- **Ground-triggered, not continuous motion.** The motor sits idle (or holds position) between drops and only moves on command from the flight controller / companion computer over telemetry, matching the single-index-per-call design of `stepper60.py`.
-- **Positional accuracy matters more than speed.** A missed or partial index could jam the mechanism or drop two parcels at once mid-air, so the current limit (Vref) and microstepping should be tuned for reliable full-torque indexing under the load of an off-balance, partially-loaded carousel — not for top speed.
-- **Weight and power budget.** A 1 kg total payload plus the actuator, driver, wiring, and 9 V supply all add to the drone's takeoff weight — factor this into the airframe's payload capacity separately from the electronics design below.
-- **Fail-safe consideration.** Since the code releases the motor (disables the driver) after each move by default, an unloaded/de-energized carousel could potentially drift under vibration or gusts. If holding torque between drops is required to prevent unintended releases mid-flight, keep the driver enabled (see the "Holding torque" note under Troubleshooting/Notes) at the cost of extra heat and current draw — test this tradeoff on the bench before flight.
-- **Command source.** "Via telemetry" in this project means index commands arrive from the drone's companion computer/GCS link rather than a human at a terminal — wire `stepper60.py` into that command channel (e.g. triggered by a MAVLink command, an MQTT message, or a serial packet) rather than running it interactively in flight.
+---
 
-## Hardware
+## One-time setup (Pi) — do this once, needs Wi-Fi SSH access
 
-- Raspberry Pi 4B
-- NEMA 17 stepper motor
-- A4988 breakout board (3-pin DIP microstep selector, E/D/S signal header, JST motor connector)
-- 9 V / 1 A DC power supply (per the board's silkscreen — do not use 12 V on this board)
-- 100 µF electrolytic capacitor across the 9V/GND power input (if not already fitted)
-- Multimeter (for setting the current limit)
-- Small plastic/ceramic screwdriver (for the Vref trim pot)
-- Jumper wires
+You only need to do this section **once per Pi**. After this, the Pi
+brings up the radio link on its own at every boot, without Wi-Fi.
 
-## Wiring
+### 1. Identify the radio's serial device
 
-All grounds must be common. Power off while wiring.
+SSH into the Pi over Wi-Fi as usual, then plug in the telemetry radio and
+check:
 
-| Board pin | Connect to | Pi GPIO (BCM) | Pi physical pin |
-|---|---|---|---|
-| **E** (ENABLE) | Pi GPIO | GPIO 16 | 36 |
-| **D** (DIR) | Pi GPIO | GPIO 21 | 40 |
-| **S** (STEP) | Pi GPIO | GPIO 20 | 38 |
-| **5V** | Pi 5V | — | 2 |
-| **GND** (logic) | Pi GND | — | 6 |
-| **9V** | + of 9 V supply | — | — |
-| **GND** (power) | − of 9 V supply, common with Pi GND | — | — |
-| Motor JST | NEMA 17 motor cable | — | — |
+```bash
+ls /dev/ttyUSB*
+```
 
-> Verify pin labels against your own board's silkscreen before connecting — wire by the printed letter (E/D/S), not by position.
+You should see `/dev/ttyUSB0`. If your setup uses a different device name,
+substitute it everywhere below.
 
-## Microstepping
-
-Set all three DIP switches to **ON** for 1/16 microstepping (3200 steps/revolution), unless the table printed on your board specifies different switch positions for 1/16. This must match `STEPS_PER_REV` in the code.
-
-## Setting the current limit (Vref)
-
-Do this with the **motor unplugged**.
-
-1. Power the board (9V, 5V, GND connected).
-2. Multimeter on DC volts. Black probe on GND, red probe on the small trim-pot screw on top of the A4988 chip.
-3. Compute the target: `Vref = I_limit × 8 × Rsense`
-   - Read `Rsense` off the two small resistors next to the chip (commonly 0.1 Ω or 0.068 Ω).
-   - Set `I_limit` to roughly 70% of the motor's rated current, and no more than ~0.7 A given the 1 A supply.
-
-| Motor rated | Rsense 0.068 Ω | Rsense 0.1 Ω |
-|---|---|---|
-| 1.0 A | 0.38 V | 0.56 V |
-| 1.5 A | 0.54 V | 0.80 V |
-| 1.7 A | 0.65 V | 0.96 V |
-
-4. Turn the screw slowly with a plastic screwdriver until the target voltage is reached. Power off before plugging in the motor.
-
-**Never connect or disconnect the motor while powered.**
-
-## Software setup
+### 2. Install PPP
 
 ```bash
 sudo apt update
-sudo apt install python3-rpi.gpio
+sudo apt install ppp -y
 ```
 
-Save `stepper60.py` (included in this repo) and run:
+### 3. Create the systemd service
 
 ```bash
-python3 stepper60.py 1     # one 60° index forward
-python3 stepper60.py 6     # full revolution (6 × 60°), returns exactly to start
-python3 stepper60.py -2    # two indexes in reverse
+sudo nano /etc/systemd/system/telem-ppp.service
 ```
 
-### How it avoids drift
+Paste in:
 
-3200 steps/rev is not evenly divisible by 6 (60° steps), so rounding each individual move would accumulate error over repeated indexing. The script instead tracks the **absolute cumulative target** in steps and rounds that, so after 6 indexes the motor lands on exactly 3200 steps (360°) with zero net drift.
+```ini
+[Unit]
+Description=PPP over telemetry radio
+After=multi-user.target
 
-### Adjusting speed
+[Service]
+ExecStart=/usr/sbin/pppd /dev/ttyUSB0 57600 10.0.0.1:10.0.0.2 local noauth nocrtscts nodetach
+ExecStartPost=/bin/sleep 2
+ExecStartPost=/sbin/ip link set ppp0 mtu 296
+Restart=always
+RestartSec=5
 
-Speed is controlled by `STEP_DELAY` in the script (seconds of HIGH + seconds of LOW per step).
+[Install]
+WantedBy=multi-user.target
+```
 
-- Steps/second = `1 / (2 × STEP_DELAY)`
-- RPM = `steps_per_second × 60 / STEPS_PER_REV`
+> Adjust `57600` if your team's radios are configured for a different baud
+> rate — it must match on both radios' own configuration and this file.
 
-| STEP_DELAY | Approx. speed |
-|---|---|
-| 0.004 | ~2.3 RPM |
-| 0.002 | ~4.7 RPM |
-| 0.001 (default) | ~9.4 RPM |
-| 0.0005 | ~19 RPM |
+Save and exit (`Ctrl+O`, `Enter`, `Ctrl+X` in nano).
 
-Lower `STEP_DELAY` = faster, but pure `time.sleep` timing on a Pi gets unreliable much above ~40 RPM at 1/16 microstepping — use `pigpio` waveforms or hardware PWM for smoother high-speed motion.
+### 4. Enable and start it
 
-## Switching to telemetry-link SSH
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable telem-ppp
+sudo systemctl start telem-ppp
+```
 
-If you want to command this actuator over the telemetry radio link instead of Wi-Fi/4G (for field/flight use), see [4G-to-Telem-Transfer](https://github.com/Aerial-Robot-Study-Circle-COEP/4G-to-Telem-Transfer) — it sets up PPP over a SiK-style telemetry radio pair so you can `ssh` to the companion Pi the same way, just over the radio link instead.
+### 5. Verify
 
-## First test
+```bash
+systemctl status telem-ppp
+ip addr show ppp0
+```
 
-1. Confirm wiring, DIP switches, and Vref are all set. Motor plugged in, power off.
-2. Mark the shaft (tape or similar) as a visual reference.
-3. Power on, run `python3 stepper60.py 1` — shaft should turn 60°.
-4. Run `python3 stepper60.py 6` — shaft should return exactly to the marked position.
+You should see `ppp0` with IP `10.0.0.1`.
+
+**Test it:** power-cycle the Pi with no Wi-Fi and no display connected,
+wait ~30 seconds after boot, and confirm the link comes up on its own
+(see the laptop-side steps below to check from the other end).
+
+This step only needs to be repeated if you re-flash the Pi's SD card.
+
+---
+
+## Every time you want to connect (laptop side)
+
+No setup needed beyond this each session — just these steps:
+
+### 1. Plug in your matching telemetry radio to the laptop
+
+### 2. Find the device
+
+**Windows (via WSL):**
+
+The radio needs to be attached to WSL first, since WSL doesn't see USB
+devices by default. `usbipd attach` doesn't persist across PC restarts on
+its own, so set up the startup script below once — after that, this step
+is automatic on every login and you can skip straight to "Start the PPP
+client."
+
+**One-time setup, install usbipd (if not already done):**
+
+In cmd or PowerShell as Administrator:
+
+```powershell
+winget install usbipd
+```
+
+**One-time setup, auto-attach on every login:**
+
+1. Find your radio's busid:
+   ```
+   usbipd list
+   ```
+2. Create the startup script — use whichever of these matches where
+   `usbipd` works for you (cmd or PowerShell); either works the same way.
+
+   **Option A — cmd (`.bat` file):**
+   ```bat
+   @echo off
+   usbipd attach --wsl --busid <BUSID> --auto-attach
+   ```
+   Save as `attach-telem.bat` (replace `<BUSID>` with the value from
+   step 1).
+
+   **Option B — PowerShell (`.ps1` file):**
+   ```powershell
+   usbipd attach --wsl --busid <BUSID> --auto-attach
+   ```
+   Save as `attach-telem.ps1` (replace `<BUSID>` with the value from
+   step 1).
+
+   > Not sure which one has `usbipd` on its PATH? Run `where.exe usbipd`
+   > in each — whichever returns a path is the one to use. If cmd works
+   > and PowerShell doesn't (or vice versa), just go with the one that
+   > works; no need to chase down the PATH issue.
+
+3. Place the script in your Windows Startup folder:
+   - Open it via `Win + R` → type `shell:startup` → Enter.
+   - **`.bat` file:** copy the file itself directly into this folder.
+   - **`.ps1` file:** PowerShell scripts don't run on double-click by
+     default, so instead create a **shortcut** here pointing at:
+     ```
+     powershell.exe -ExecutionPolicy Bypass -File "C:\path\to\attach-telem.ps1"
+     ```
+     (Right-click inside the Startup folder → New → Shortcut → paste the
+     line above as the location, using the actual path where you saved
+     the `.ps1` file.)
+4. Mark it to run as administrator (`usbipd attach` requires elevation):
+   - **`.bat` file:** right-click it → Properties → if a Shortcut tab is
+     present, go to Advanced → check **"Run as administrator"** → OK →
+     OK. If there's no Shortcut tab, Windows will still prompt via UAC
+     when it runs — that's fine.
+   - **`.ps1` shortcut:** right-click the shortcut → Properties →
+     Shortcut tab → Advanced → check **"Run as administrator"** → OK →
+     OK.
+
+From now on, this runs automatically on every login (you'll get one UAC
+prompt to click "Yes" on each time) and the radio will already be
+attached to WSL by the time you open a terminal — no manual `usbipd`
+commands needed per session.
+
+**Verify it worked**, any time:
+
+```bash
+ls /dev/ttyUSB*
+```
+
+If this comes up empty despite the startup script, check `usbipd list`
+in Windows — the busid may have changed (e.g. radio plugged into a
+different USB port), in which case update it in `attach-telem.bat`.
+
+**Mac/Linux:**
+
+```bash
+ls /dev/tty.usb*      # Mac
+ls /dev/ttyUSB*       # Linux
+```
+
+### 3. Start the PPP client
+
+```bash
+sudo pppd /dev/ttyUSB0 57600 10.0.0.2:10.0.0.1 local noauth nocrtscts nodetach
+```
+
+Leave this terminal running — **do not close it or press Ctrl+C in this
+window**, that will tear down the link. Open a new terminal tab/window for
+the next steps.
+
+### 4. Set the MTU (new terminal, not the one running pppd)
+
+```bash
+sudo ip link set ppp0 mtu 296
+```
+
+### 5. Confirm the link is up
+
+```bash
+ping 10.0.0.1
+```
+
+You should get replies, though expect noticeably higher latency
+(~150–250 ms) than Wi-Fi — this is normal over a radio link and does not
+mean anything is wrong.
+
+### 6. SSH in
+
+```bash
+ssh <username>@10.0.0.1
+```
+
+Give it up to 30–60 seconds if the prompt doesn't appear instantly — SSH's
+handshake takes several round trips, and each round trip is slow on this
+link.
+
+---
+
+## Ending a session
+
+When you're done:
+
+1. Close the SSH session (`exit` or `Ctrl+D`).
+2. On the laptop, go to the terminal running `pppd` and press `Ctrl+C` to
+   bring the client-side link down.
+3. The Pi's side will automatically retry/reconnect on its own next time
+   (`Restart=always` in the service), so nothing needs to be done on the Pi.
+
+---
 
 ## Troubleshooting
 
-| Symptom | Likely fix |
-|---|---|
-| Nothing moves | Try flipping `EN_ACTIVE_LOW` in the script; check 9 V present and common ground |
-| Motor buzzes but doesn't turn | Swap the two wires of one motor coil (power off first), or increase `STEP_DELAY` |
-| Wrong angle per index | Confirm all DIP switches ON and `STEPS_PER_REV = 3200` matches |
-| Motor skips steps | Increase Vref slightly (within motor rating) or increase `STEP_DELAY` |
-| Driver runs very hot | Decrease Vref |
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `ls /dev/ttyUSB*` shows nothing (WSL) | Radio not attached to WSL, or startup script didn't run/busid changed | Check `usbipd list` in Windows; re-run the `.bat` manually or fix the busid in it |
+| `pppd: unrecognized option '/dev/ttyUSB0'` | Device doesn't exist yet | Fix the above first, then retry `pppd` |
+| `LCP: timeout sending Config-Requests` then terminates | Other side's `pppd` isn't running yet | Make sure the Pi's service is active (`systemctl status telem-ppp`) and start the laptop side after |
+| `ping` works but `ssh` hangs indefinitely | MTU too high, large packets dropped | Run `sudo ip link set ppp0 mtu 296` on **both** ends, in a separate terminal from the one running `pppd` |
+| Link drops when you Ctrl+C | You pressed Ctrl+C in the terminal running `pppd` itself | Only Ctrl+C in the terminal running `ssh`; leave `pppd` terminals alone |
+| Works fine but very slow, laggy typing | Expected — SiK-style radios are ~8–57 kbps | Normal for this link; don't `scp` large files over it, use it for lightweight shell access only |
 
-## Notes / caveats
+---
 
-- This board is rated for **9 V / 1 A** — do not substitute a 12 V supply.
-- Exact pinout/DIP tables vary slightly between A4988 breakout clones — always confirm against your own board's silkscreen before powering up.
-- No feedback/encoder is used; this is open-loop stepping. Missed steps under excess load or insufficient current will not be detected by the software.
+## Notes for the team
+
+- This link is meant for **field use when Wi-Fi/4G isn't available** — for
+  bench testing, prefer normal Wi-Fi SSH, it's faster and simpler.
+- If your team runs **two** telemetry radio pairs (one for MAVLink to the
+  GCS, one dedicated to this SSH link), make sure `NETID`/frequency
+  settings on each pair don't overlap.
+- For anything you don't want to lose if the radio link glitches mid-task
+  (e.g. running a script during a flight), run it inside `tmux` on the Pi
+  so it survives an SSH disconnect:
+
+  ```bash
+  tmux new -s work
+  # run your script
+  # Ctrl+B then D to detach
+  ```
+
+  Reattach later with `tmux attach -t work`.
